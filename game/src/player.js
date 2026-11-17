@@ -1,98 +1,135 @@
-// Neon Bay — the player on foot: movement, health, punching, shooting, money.
-// Original character: "Rook", a small-time courier trying to go straight.
-import { clamp, dist } from './rng.js';
-import { collidesBuilding } from './city.js';
+// The player on foot: walking, running, punching, shooting, and
+// entering / exiting / stealing cars. Health, cash and ammo live here.
+import { CONFIG } from './config.js';
+import { clamp, dist, angleTo } from './rng.js';
+import { collidesWithBuilding } from './city.js';
 
-export function createPlayer(x, y) {
-  return {
-    x, y, angle: 0, speed: 0, health: 100, maxHealth: 100,
-    money: 0, ammo: 24, inCar: null, punchCooldown: 0, shootCooldown: 0,
-    name: 'Rook', walkPhase: 0, alive: true,
-  };
-}
-
-export function updatePlayer(player, input, city, dt, world) {
-  if (!player.alive || player.inCar) return;
-  let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-  let my = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-  const len = Math.hypot(mx, my);
-  if (len > 0) {
-    mx /= len; my /= len;
-    player.angle = Math.atan2(my, mx);
-    player.walkPhase += dt * 10;
-    const speed = 170;
-    const nx = player.x + mx * speed * dt;
-    const ny = player.y + my * speed * dt;
-    if (!collidesBuilding(city, nx, player.y, 14)) player.x = nx;
-    if (!collidesBuilding(city, player.x, ny, 14)) player.y = ny;
-    player.x = clamp(player.x, 20, 3180);
-    player.y = clamp(player.y, 20, 2380);
+export class Player {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.angle = -Math.PI / 2;
+    this.health = CONFIG.playerHealth;
+    this.cash = 150;
+    this.ammo = 24;
+    this.hasGun = true;
+    this.inCar = false;
+    this.car = null;
+    this.punchTimer = 0;
+    this.shootCooldown = 0;
+    this.hurtFlash = 0;
+    this.walkBob = 0;
+    this.moving = false;
   }
-  player.punchCooldown = Math.max(0, player.punchCooldown - dt);
-  player.shootCooldown = Math.max(0, player.shootCooldown - dt);
-  if (player.health <= 0) { player.alive = false; world.state = 'busted'; }
-}
 
-// Punch: hits the nearest pedestrian / officer within 34px in front.
-export function playerPunch(player, world) {
-  if (player.punchCooldown > 0 || player.inCar) return false;
-  player.punchCooldown = 0.35;
-  const targets = [...world.peds, ...world.police.officers];
-  for (const t of targets) {
-    if (dist(player.x, player.y, t.x, t.y) < 40) {
-      t.health = (t.health ?? 100) - 34;
-      t.knocked = true; t.knockTimer = 0.6;
-      t.fleeing = true;
-      if (t.health <= 0) t.down = true;
-      world.addWanted(1, 'Assault');
-      world.audio.punch();
-      world.addFloatText(t.x, t.y - 20, 'POW!', '#ffdf3d');
-      return true;
+  updateOnFoot(dt, input, city, game) {
+    const mv = input.moveVector();
+    this.moving = mv.x !== 0 || mv.y !== 0;
+    const speed = (input.down('Shift') ? CONFIG.playerRunSpeed : CONFIG.playerWalkSpeed);
+    if (this.moving) {
+      this.angle = Math.atan2(mv.y, mv.x);
+      this.walkBob += dt * 11;
+      const nx = this.x + mv.x * speed * dt;
+      const ny = this.y + mv.y * speed * dt;
+      if (!collidesWithBuilding(city, nx, this.y, CONFIG.playerRadius)) this.x = nx;
+      if (!collidesWithBuilding(city, this.x, ny, CONFIG.playerRadius)) this.y = ny;
+      this.x = clamp(this.x, 30, CONFIG.worldW - 30);
+      this.y = clamp(this.y, 30, CONFIG.worldH - 30);
+    }
+    this.punchTimer = Math.max(0, this.punchTimer - dt);
+    this.shootCooldown = Math.max(0, this.shootCooldown - dt);
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt);
+    // Aim at the mouse when shooting with it; otherwise face movement.
+    if (game.mouseAim) {
+      const wx = game.camera.x + input.mouseX;
+      const wy = game.camera.y + input.mouseY;
+      if (dist(this.x, this.y, wx, wy) > 40) this.angle = angleTo(this.x, this.y, wx, wy);
     }
   }
-  world.audio.punch();
-  return false;
-}
 
-// Shoot toward the mouse (screen -> world via camera).
-export function playerShoot(player, input, cam, world) {
-  if (player.shootCooldown > 0 || player.ammo <= 0 || player.inCar) return false;
-  player.shootCooldown = 0.22;
-  player.ammo -= 1;
-  const wx = cam.x + input.mouseX * (cam.w / world.viewW);
-  const wy = cam.y + input.mouseY * (cam.h / world.viewH);
-  const a = Math.atan2(wy - player.y, wx - player.x);
-  player.angle = a;
-  world.bullets.push({ x: player.x + Math.cos(a) * 20, y: player.y + Math.sin(a) * 20, vx: Math.cos(a) * 620, vy: Math.sin(a) * 620, life: 0.7, fromPlayer: true });
-  world.audio.shoot();
-  world.addWanted(1, 'Shots fired');
-  return true;
-}
+  tryShoot(game) {
+    if (this.shootCooldown > 0) return false;
+    if (this.hasGun) {
+      if (this.ammo <= 0) { game.audio.tone(160, 0.06, 'square', 0.08); this.shootCooldown = 0.25; return false; }
+      this.ammo--;
+      this.shootCooldown = 0.22;
+      game.fireBullet(this.x, this.y, this.angle, true);
+      game.audio.shoot();
+      return true;
+    }
+    this.punchTimer = 0.28;
+    this.shootCooldown = 0.35;
+    game.audio.punch();
+    game.punchHit(this.x + Math.cos(this.angle) * 30, this.y + Math.sin(this.angle) * 30);
+    return true;
+  }
 
-export function drawPlayer(ctx, player, cam) {
-  if (!player.alive) return;
-  const x = player.x - cam.x, y = player.y - cam.y;
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(player.angle);
-  // Shadow.
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.beginPath(); ctx.ellipse(2, 4, 15, 11, 0, 0, Math.PI * 2); ctx.fill();
-  // Body: teal jacket, dark jeans.
-  ctx.fillStyle = '#1f6f6b'; ctx.fillRect(-12, -9, 20, 18);
-  ctx.fillStyle = '#22293a'; ctx.fillRect(-16, -8, 8, 16);
-  // Head + cap.
-  ctx.fillStyle = '#f2c29b'; ctx.beginPath(); ctx.arc(12, 0, 8, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#ff5d8f'; ctx.fillRect(6, -8, 10, 16);
-  // Arms swing while walking.
-  const swing = Math.sin(player.walkPhase) * 4;
-  ctx.fillStyle = '#f2c29b';
-  ctx.fillRect(-2, -13, 8, 5); ctx.fillRect(-2 + swing * 0.3, 8, 8, 5);
-  ctx.restore();
-  // Health bar when hurt.
-  if (player.health < 100) {
-    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x - 16, y - 28, 32, 5);
-    ctx.fillStyle = player.health > 40 ? '#57cc7a' : '#ff5d5d';
-    ctx.fillRect(x - 16, y - 28, 32 * (player.health / 100), 5);
+  takeDamage(amount, game) {
+    this.health = Math.max(0, this.health - amount);
+    this.hurtFlash = 0.35;
+    game.audio.hurt();
+    if (this.health <= 0) game.wasted();
+  }
+
+  heal(amount) { this.health = Math.min(CONFIG.playerHealth, this.health + amount); }
+
+  enterCar(car, game) {
+    this.inCar = true;
+    this.car = car;
+    car.parked = false;
+    car.kind = 'player';
+    game.audio.door();
+    game.audio.carStart();
+  }
+
+  exitCar(game) {
+    if (!this.car) return;
+    const a = this.car.angle + Math.PI / 2;
+    this.x = this.car.x + Math.cos(a) * 42;
+    this.y = this.car.y + Math.sin(a) * 42;
+    this.inCar = false;
+    this.car.kind = 'parked';
+    this.car.speed = 0;
+    this.car = null;
+    game.audio.door();
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    const bob = this.moving ? Math.sin(this.walkBob) * 3 : 0;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath(); ctx.ellipse(0, 8, 11, 5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.rotate(this.angle + Math.PI / 2);
+    // Legs
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(-4, 2); ctx.lineTo(-4 - bob, 12);
+    ctx.moveTo(4, 2); ctx.lineTo(4 + bob, 12);
+    ctx.stroke();
+    // Jacket (teal, the player's signature look)
+    ctx.fillStyle = '#0ea5a5';
+    ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillRect(-10, -4, 20, 6);
+    // Head
+    ctx.fillStyle = '#f2c89b';
+    ctx.beginPath(); ctx.arc(0, -13, 7.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#111827';
+    ctx.beginPath(); ctx.arc(0, -15, 7.5, Math.PI, Math.PI * 2); ctx.fill();
+    // Gun or fist
+    if (this.hasGun) {
+      ctx.fillStyle = '#374151';
+      ctx.fillRect(-2, -26, 4, 12);
+    } else if (this.punchTimer > 0) {
+      ctx.fillStyle = '#f2c89b';
+      ctx.beginPath(); ctx.arc(0, -24, 5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    // Name tag
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('REX', this.x, this.y - 26);
   }
 }

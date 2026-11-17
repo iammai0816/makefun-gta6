@@ -1,105 +1,109 @@
-// Neon Bay — story missions. Three original jobs for Rook, handed out by
-// "Vera", a fixer who runs the Marina Row docks. Complete them in order for cash.
+// Story missions from fixer Vera Solano: three jobs that take the player
+// across Neon Bay, with step markers, rewards and wanted heat.
+import { MISSIONS } from './config.js';
 import { dist } from './rng.js';
 
-export const MISSIONS = [
-  {
-    id: 1, title: 'Pick Up the Package',
-    brief: 'Vera: "A package is waiting at the Marina Row docks. Walk over and grab it. No trouble — yet."',
-    objective: 'Reach the yellow marker at Marina Row',
-    x: 260, y: 260, reward: 250, needsCar: false, kind: 'reach',
-  },
-  {
-    id: 2, title: 'Lose the Heat',
-    brief: 'Vera: "The package was hot. The cops are on you. Break their line of sight and stay hidden till the stars fade."',
-    objective: 'Get wanted, then lose the police (stars to zero)',
-    x: 1500, y: 1500, reward: 400, needsCar: false, kind: 'loseHeat',
-  },
-  {
-    id: 3, title: 'Getaway Driver',
-    brief: 'Vera: "Last job: drive the package to the Sunset Strip garage. Steal a car if you have to — just get there fast."',
-    objective: 'Drive a car to the Sunset Strip garage',
-    x: 900, y: 1700, reward: 750, needsCar: true, kind: 'driveTo',
-  },
-];
-
-export function createMissions() {
-  return { index: 0, active: null, done: [], started: false, heatWasWanted: false };
-}
-
-export function startNextMission(world) {
-  const m = world.missions;
-  if (m.index >= MISSIONS.length) { world.addMessage('All jobs done — Neon Bay is yours, Rook.'); return null; }
-  const def = MISSIONS[m.index];
-  m.active = { ...def, state: 'active' };
-  m.started = true;
-  m.heatWasWanted = false;
-  world.addMessage(`NEW JOB: ${def.title} — ${def.objective}`);
-  world.audio.pickup();
-  if (def.id === 2 && !world.shotMode) {
-    // The heat arrives on cue: a patrol spots the package.
-    setTimeout(() => { if (world.missions.active && world.missions.active.id === 2) world.addWanted(2, 'Spotted with the package'); }, 1200);
+export class MissionManager {
+  constructor() {
+    this.index = 0; // next mission to start
+    this.active = null;
+    this.step = 0;
+    this.completed = [];
+    this.message = '';
+    this.messageTimer = 0;
+    this.targetCar = null;
   }
-  return m.active;
-}
 
-export function updateMissions(world, dt) {
-  const m = world.missions;
-  if (!m.active) return;
-  const p = world.player;
-  const a = m.active;
-  if (a.kind === 'loseHeat' && world.wanted > 0) m.heatWasWanted = true;
-  let done = false;
-  if (a.kind === 'reach' && dist(p.x, p.y, a.x, a.y) < 60) done = true;
-  if (a.kind === 'driveTo' && p.inCar && dist(p.x, p.y, a.x, a.y) < 80) done = true;
-  if (a.kind === 'loseHeat' && m.heatWasWanted && world.wanted === 0) done = true;
-  if (done) completeMission(world);
-}
+  currentDef() { return MISSIONS[this.index] || null; }
 
-function completeMission(world) {
-  const m = world.missions;
-  const a = m.active;
-  m.done.push(a.id);
-  world.player.money += a.reward;
-  world.addMessage(`JOB DONE: ${a.title} — +$${a.reward}`);
-  world.addFloatText(world.player.x, world.player.y - 34, `+$${a.reward}`, '#57cc7a');
-  world.audio.missionDone();
-  m.active = null;
-  m.index += 1;
-  world.save();
-  if (m.index < MISSIONS.length) {
-    setTimeout(() => startNextMission(world), 1500);
-  } else {
-    world.addMessage('STORY COMPLETE: Rook is the new name on the Bay. Free roam!');
+  start(game) {
+    const def = this.currentDef();
+    if (!def || this.active) return false;
+    this.active = def;
+    this.step = 0;
+    this.message = def.title + ' — ' + def.brief;
+    this.messageTimer = 7;
+    if (def.wantedOnStart > 0) game.police.setWanted(def.wantedOnStart, game.audio);
+    if (def.id === 'neon-getaway') {
+      // The coral sports car waiting at the plaza.
+      const c = game.spawnMissionCar(1720, 1280);
+      this.targetCar = c;
+    }
+    game.audio.pickup();
+    return true;
   }
-}
 
-export function drawMissionMarker(ctx, mission, cam, time) {
-  if (!mission) return;
-  const x = mission.x - cam.x, y = mission.y - cam.y;
-  const pulse = 1 + Math.sin(time * 4) * 0.15;
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.strokeStyle = '#ffd32a';
-  ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.arc(0, 0, 34 * pulse, 0, Math.PI * 2); ctx.stroke();
-  ctx.fillStyle = 'rgba(255,211,42,0.25)';
-  ctx.beginPath(); ctx.arc(0, 0, 34 * pulse, 0, Math.PI * 2); ctx.fill();
-  // Beacon beam.
-  ctx.fillStyle = 'rgba(255,211,42,0.35)';
-  ctx.fillRect(-4, -90, 8, 90);
-  ctx.fillStyle = '#ffd32a';
-  ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(10, 4); ctx.lineTo(-10, 4); ctx.closePath(); ctx.fill();
-  ctx.restore();
-  // Off-screen arrow pointing at the marker.
-  const sx = Math.max(40, Math.min(cam.w - 40, x));
-  const sy = Math.max(40, Math.min(cam.h - 40, y));
-  if (x !== sx || y !== sy) {
-    ctx.save();
-    ctx.translate(sx, sy);
-    ctx.rotate(Math.atan2(y - sy, x - sx));
-    ctx.fillStyle = '#ffd32a';
-    ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -9); ctx.lineTo(-8, 9); ctx.closePath(); ctx.fill();
-    ctx.restore();
+  stepDef() {
+    if (!this.active) return null;
+    return this.active.steps[this.step] || null;
+  }
+
+  targetPos() {
+    const s = this.stepDef();
+    return s ? { x: s.x, y: s.y, radius: s.radius, label: s.label, kind: s.kind } : null;
+  }
+
+  update(dt, game) {
+    this.messageTimer = Math.max(0, this.messageTimer - dt);
+    if (!this.active) return;
+    const s = this.stepDef();
+    if (!s) return;
+    const p = game.player;
+    const px = p.inCar && p.car ? p.car.x : p.x;
+    const py = p.inCar && p.car ? p.car.y : p.y;
+    if (s.kind === 'steal') {
+      if (this.targetCar && p.inCar && p.car === this.targetCar) this.advance(game);
+      return;
+    }
+    if (s.kind === 'grab') {
+      if (dist(px, py, s.x, s.y) < s.radius) {
+        game.player.cash += 0; // cash comes at completion
+        this.message = 'Cash grabbed! Get to the hideout — and shake the cops first.';
+        this.messageTimer = 5;
+        game.police.setWanted(3, game.audio);
+        this.advance(game);
+      }
+      return;
+    }
+    if (s.kind === 'escape') {
+      if (game.police.wanted === 0 && dist(px, py, s.x, s.y) < s.radius) this.advance(game);
+      return;
+    }
+    if (dist(px, py, s.x, s.y) < s.radius) this.advance(game);
+  }
+
+  advance(game) {
+    this.step++;
+    game.audio.pickup();
+    if (this.step >= this.active.steps.length) {
+      const def = this.active;
+      game.player.cash += def.reward;
+      game.player.heal(30);
+      this.completed.push(def.id);
+      this.message = def.title + ' COMPLETE — Vera paid you $' + def.reward + '.';
+      this.messageTimer = 6;
+      game.audio.missionDone();
+      game.audio.cash();
+      game.saveGame();
+      this.active = null;
+      this.index++;
+      this.targetCar = null;
+    } else {
+      const s = this.stepDef();
+      this.message = 'Next: ' + s.label;
+      this.messageTimer = 5;
+    }
+  }
+
+  allDone() { return this.index >= MISSIONS.length; }
+
+  objectiveText() {
+    if (this.active) {
+      const s = this.stepDef();
+      return this.active.title + ' — ' + (s ? s.label : '');
+    }
+    if (this.allDone()) return 'All missions complete! Free roam Neon Bay.';
+    const next = this.currentDef();
+    return next ? 'Next job: ' + next.title + ' — press M to start' : 'Free roam';
   }
 }
