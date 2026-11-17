@@ -15,3 +15,4 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 ---
 
 <sub>Entered on [make.fun](https://make.fun/?ref=x2cehm2b) for the “Make GTA 6” bounty.</sub>
+

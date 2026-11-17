@@ -1,2 +1,4 @@
+# Local build output — generated at runtime, never committed.
 out/
+# Installed dependencies — fetched locally, not part of the repo.
 node_modules/
